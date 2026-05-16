@@ -1,0 +1,6 @@
+{
+  "name": "BitForge",
+  "description": "AI-collaborative 16x16x16 Minecraft Bedrock furniture builder with .mcaddon export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

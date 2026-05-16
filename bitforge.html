@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BitForge | AI Minecraft Voxel Builder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #09090b; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        canvas { outline: none; }
+    </style>
+</head>
+<body class="text-zinc-100 selection:bg-indigo-500/30 overflow-hidden">
+    <div id="root"></div>
+
+    <script>
+        const { useState, useEffect, useRef } = React;
+
+        const GRID_SIZE = 16;
+        const BLOCKS = [
+            { id: 'oak_planks', name: 'Oak Planks', color: 0x9d814d, hex: '#9d814d' },
+            { id: 'oak_log', name: 'Oak Log', color: 0x5a4a35, hex: '#5a4a35' },
+            { id: 'stripped_oak', name: 'Stripped Oak', color: 0xc8aa6e, hex: '#c8aa6e' },
+            { id: 'spruce_planks', name: 'Spruce Planks', color: 0x684e2e, hex: '#684e2e' },
+            { id: 'stone', name: 'Stone', color: 0x7d7d7d, hex: '#7d7d7d' },
+            { id: 'white_wool', name: 'White Wool', color: 0xe4e4e4, hex: '#e4e4e4' },
+            { id: 'red_wool', name: 'Red Wool', color: 0x9e2b27, hex: '#9e2b27' },
+            { id: 'blue_wool', name: 'Blue Wool', color: 0x334cb2, hex: '#334cb2' },
+            { id: 'yellow_wool', name: 'Yellow Wool', color: 0xf9c623, hex: '#f9c623' },
+            { id: 'green_wool', name: 'Green Wool', color: 0x546d1b, hex: '#546d1b' },
+            { id: 'black_wool', name: 'Black Wool', color: 0x141419, hex: '#141419' },
+            { id: 'glass', name: 'Glass', color: 0xadd8e6, hex: '#add8e6' },
+            { id: 'iron_block', name: 'Iron Block', color: 0xdfdfdf, hex: '#dfdfdf' },
+            { id: 'gold_block', name: 'Gold Block', color: 0xf9d846, hex: '#f9d846' },
+        ];
+
+        function App() {
+            const [voxels, setVoxels] = useState({});
+            const [selectedBlock, setSelectedBlock] = useState(BLOCKS[0].id);
+            const [apiKey, setApiKey] = useState('');
+            const [prompt, setPrompt] = useState('');
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [status, setStatus] = useState('Ready');
+
+            const containerRef = useRef(null);
+            const sceneRef = useRef(null);
+
+            useEffect(() => {
+                const scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x09090b);
+
+                const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+                camera.position.set(25, 25, 25);
+
+                const renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                containerRef.current.appendChild(renderer.domElement);
+
+                const controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.target.set(8, 8, 8);
+
+                scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+                sun.position.set(10, 20, 10);
+                scene.add(sun);
+
+                const voxelsGroup = new THREE.Group();
+                scene.add(voxelsGroup);
+
+                const grid = new THREE.GridHelper(GRID_SIZE, GRID_SIZE, 0x222222, 0x111111);
+                grid.position.set(7.5, -0.5, 7.5);
+                scene.add(grid);
+
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2();
+
+                sceneRef.current = { scene, camera, renderer, controls, voxelsGroup, raycaster, mouse };
+
+                const animate = () => {
+                    requestAnimationFrame(animate);
+                    controls.update();
+                    renderer.render(scene, camera);
+                };
+                animate();
+
+                const handleResize = () => {
+                    const width = containerRef.current.clientWidth;
+                    const height = containerRef.current.clientHeight;
+                    camera.aspect = width / height;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(width, height);
+                };
+                window.addEventListener('resize', handleResize);
+
+                return () => window.removeEventListener('resize', handleResize);
+            }, []);
+
+            useEffect(() => {
+                if (!sceneRef.current) return;
+                const { voxelsGroup } = sceneRef.current;
+                while(voxelsGroup.children.length > 0) voxelsGroup.remove(voxelsGroup.children[0]);
+
+                Object.values(voxels).forEach(v => {
+                    const block = BLOCKS.find(b => b.id === v.block) || BLOCKS[0];
+                    const mesh = new THREE.Mesh(
+                        new THREE.BoxGeometry(1, 1, 1),
+                        new THREE.MeshStandardMaterial({ color: block.color })
+                    );
+                    mesh.position.set(v.x, v.y, v.z);
+                    mesh.userData = { x: v.x, y: v.y, z: v.z };
+                    voxelsGroup.add(mesh);
+                });
+            }, [voxels]);
+
+            const handlePointerDown = (e) => {
+                if (!sceneRef.current) return;
+                const { camera, voxelsGroup, raycaster, mouse } = sceneRef.current;
+                const rect = containerRef.current.getBoundingClientRect();
+                mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(voxelsGroup.children);
+
+                if (e.button === 0) {
+                    if (intersects.length > 0) {
+                        const hit = intersects[0];
+                        const normal = hit.face.normal;
+                        const pos = hit.object.position.clone().add(normal);
+                        if (pos.x >= 0 && pos.x < 16 && pos.y >= 0 && pos.y < 16 && pos.z >= 0 && pos.z < 16) {
+                            setVoxels(prev => ({...prev, [`${pos.x},${pos.y},${pos.z}`]: { x: pos.x, y: pos.y, z: pos.z, block: selectedBlock }}));
+                        }
+                    } else {
+                        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.5);
+                        const pt = new THREE.Vector3();
+                        if (raycaster.ray.intersectPlane(plane, pt)) {
+                            if (Math.abs(pt.x - 7.5) <= 8 && Math.abs(pt.z - 7.5) <= 8) {
+                                const px = Math.round(pt.x), pz = Math.round(pt.z);
+                                setVoxels(prev => ({...prev, [`${px},0,${pz}`]: { x: px, y: 0, z: pz, block: selectedBlock }}));
+                            }
+                        }
+                    }
+                } else if (e.button === 2) {
+                    if (intersects.length > 0) {
+                        const { x, y, z } = intersects[0].object.userData;
+                        setVoxels(prev => { const next = {...prev}; delete next[`${x},${y},${z}`]; return next; });
+                    }
+                }
+            };
+
+            const generateAI = async () => {
+                if (!apiKey || !prompt) return setStatus('Missing API Key or Prompt');
+                setIsGenerating(true);
+                setStatus('AI is forging...');
+                try {
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: `You are a Minecraft furniture designer. Return ONLY a JSON array of {x,y,z,block} where 0<=x,y,z<=15. Block types: oak_planks, oak_log, stripped_oak, spruce_planks, stone, white_wool, red_wool, blue_wool, yellow_wool, green_wool, black_wool, glass, iron_block, gold_block. Task: ${prompt}` }] }]
+                        })
+                    });
+                    const data = await res.json();
+                    const text = data.candidates[0].content.parts[0].text;
+                    const json = JSON.parse(text.match(/\[.*\]/s)[0]);
+                    const next = {};
+                    json.forEach(v => next[`${v.x},${v.y},${v.z}`] = v);
+                    setVoxels(next);
+                    setStatus('Success!');
+                } catch(e) { setStatus('Generation Failed'); }
+                setIsGenerating(false);
+            };
+
+            const exportAddon = async () => {
+                const zip = new JSZip();
+                const id = 'bf_' + Date.now();
+                const bp = zip.folder('bitforge_bp');
+                const rp = zip.folder('bitforge_rp');
+                const uuid = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => (c=='x'?(Math.random()*16|0):(Math.random()*16|0&0x3|0x8)).toString(16));
+                
+                bp.file('manifest.json', JSON.stringify({format_version:2,header:{name:'BitForge BP',uuid:uuid(),version:[1,0,0]},modules:[{type:'data',uuid:uuid(),version:[1,0,0]}]}));
+                rp.file('manifest.json', JSON.stringify({format_version:2,header:{name:'BitForge RP',uuid:uuid(),version:[1,0,0]},modules:[{type:'resources',uuid:uuid(),version:[1,0,0]}]}));
+                
+                const bones = Object.values(voxels).map((v, i) => ({
+                    name: 'v'+i, parent: 'root', pivot: [v.x-7.5, v.y+0.5, v.z-7.5],
+                    cubes: [{ origin: [v.x-8, v.y, v.z-8], size: [1,1,1], uv:[0,0] }]
+                }));
+                rp.folder('models/blocks').file(id+'.geo.json', JSON.stringify({format_version:'1.12.0','minecraft:geometry':[{description:{identifier:'geometry.'+id,texture_width:16,texture_height:16},bones:[{name:'root',pivot:[0,0,0]},...bones]}]}));
+                
+                const blob = await zip.generateAsync({type:'blob'});
+                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'bitforge.mcaddon'; a.click();
+            };
+
+            return (
+                <div className="flex h-screen w-full flex-col">
+                    <header className="flex items-center justify-between border-b border-white/5 bg-zinc-900 px-6 py-3">
+                        <div className="flex items-center gap-3">
+                            <div className="h-8 w-8 bg-indigo-600 rounded flex items-center justify-center font-bold">B</div>
+                            <span class="font-bold">BitForge</span>
+                        </div>
+                        <div className="flex gap-2">
+                             <input type="password" placeholder="API Key" value={apiKey} onChange={e=>setApiKey(e.target.value)} class="bg-zinc-800 rounded px-3 py-1 text-xs outline-none focus:ring-1 ring-indigo-500 w-32" />
+                             <button onClick={exportAddon} class="bg-indigo-600 hover:bg-indigo-500 text-xs font-bold px-4 py-1 rounded">Export .mcaddon</button>
+                        </div>
+                    </header>
+                    <div className="flex flex-1 overflow-hidden">
+                        <div ref={containerRef} className="flex-1" onPointerDown={handlePointerDown} onContextMenu={e=>e.preventDefault()}></div>
+                        <aside className="w-72 bg-zinc-900 border-l border-white/5 p-4 flex flex-col gap-6 overflow-y-auto">
+                            <div class="space-y-2">
+                                <label class="text-[10px] font-bold text-indigo-400 uppercase">AI Generator</label>
+                                <textarea placeholder="Describe furniture..." value={prompt} onChange={e=>setPrompt(e.target.value)} class="w-full h-24 bg-zinc-950 border border-white/5 rounded p-2 text-sm outline-none resize-none" />
+                                <button onClick={generateAI} disabled={isGenerating} class="w-full bg-zinc-100 text-zinc-900 font-bold py-2 rounded text-sm hover:bg-white disabled:opacity-50">{isGenerating?'Designing...':'Generate'}</button>
+                            </div>
+                            <div class="space-y-2">
+                                <div class="flex justify-between items-center"><label class="text-[10px] font-bold text-indigo-400 uppercase">Palette</label><button onClick={()=>setVoxels({})} class="text-[10px] text-zinc-500 hover:text-red-400 font-bold">CLEAR</button></div>
+                                <div class="grid grid-cols-4 gap-1">
+                                    {BLOCKS.map(b => (
+                                        <button key={b.id} onClick={()=>setSelectedBlock(b.id)} class={`aspect-square rounded border ${selectedBlock==b.id?'border-indigo-500':'border-white/5'}`} style={{background:b.hex}} />
+                                    ))}
+                                </div>
+                            </div>
+                        </aside>
+                    </div>
+                    <footer class="bg-zinc-900 border-t border-white/5 px-6 py-2 text-[10px] text-zinc-500 font-bold uppercase tracking-widest flex justify-between">
+                        <span>Status: {status}</span>
+                        <span>Voxels: {Object.keys(voxels).length}</span>
+                    </footer>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>
