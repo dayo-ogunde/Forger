@@ -11,8 +11,15 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Initialize Gemini with the platform-injected API key
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+if (!GEMINI_API_KEY) {
+  console.warn("WARNING: GEMINI_API_KEY is not set in environment variables.");
+}
+
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
+  apiKey: GEMINI_API_KEY || "",
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
@@ -20,7 +27,6 @@ const ai = new GoogleGenAI({
   }
 });
 
-// AI Generation Endpoint
 app.post("/api/forge", async (req, res) => {
   const { prompt } = req.body;
 
@@ -28,54 +34,65 @@ app.post("/api/forge", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
+  if (!GEMINI_API_KEY) {
+    return res.status(500).json({ error: "Gemini API key is missing. Please configure it in the project settings." });
+  }
+
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: prompt,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {
-        systemInstruction: `You are BitForge AI, a Minecraft Bedrock furniture architect. 
-        Your task is to generate a 3D voxel model based on a user's prompt.
-        The grid is 16x16x16 (x, y, z from 0 to 15).
-        Output a JSON object containing an array of 'voxels'.
-        Each voxel must have:
-        - x (0-15)
-        - y (0-15)
-        - z (0-15)
-        - block: a hex color string (e.g., "#9d814d") OR a preset ID from this list: oak_planks, oak_log, spruce_planks, stone, cobblestone, white_wool, red_wool, blue_wool, gold_block, glass.
-
-        Focus on structural integrity and aesthetics. 
-        For furniture, 'y=0' is the floor. 
-        Keep models within 16x16x16 dimensions.
-        Do not explain anything, just output the JSON.`,
+        systemInstruction: `You are a Minecraft Bedrock voxel furniture designer.
+Output ONLY a raw JSON array of objects.
+Each object MUST have these properties: x, y, z, block.
+Constraints: 
+- x (0-15), y (0-15), z (0-15).
+- block: one of [oak_planks, oak_log, spruce_planks, stone, cobblestone, white_wool, red_wool, blue_wool, gold_block, glass].
+- No markdown, no explanation, no surrounding text. Just the [ ... ] array.`,
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            voxels: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  x: { type: Type.INTEGER },
-                  y: { type: Type.INTEGER },
-                  z: { type: Type.INTEGER },
-                  block: { type: Type.STRING },
-                  isCustom: { type: Type.BOOLEAN }
-                },
-                required: ["x", "y", "z", "block"]
-              }
-            }
-          },
-          required: ["voxels"]
-        }
-      },
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              x: { type: Type.INTEGER },
+              y: { type: Type.INTEGER },
+              z: { type: Type.INTEGER },
+              block: { type: Type.STRING }
+            },
+            required: ["x", "y", "z", "block"]
+          }
+        },
+        temperature: 1.0,
+      }
     });
 
-    const result = JSON.parse(response.text || "{}");
-    res.json(result);
+    const text = response.text.trim();
+    console.log("AI Response:", text);
+
+    let voxels;
+    try {
+      voxels = JSON.parse(text);
+    } catch (e) {
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error("The forge produced an unreadable design blueprint.");
+      voxels = JSON.parse(jsonMatch[0]);
+    }
+    
+    if (!Array.isArray(voxels)) {
+      if ((voxels as any).voxels && Array.isArray((voxels as any).voxels)) {
+        voxels = (voxels as any).voxels;
+      } else {
+        throw new Error("AI response is not an array");
+      }
+    }
+    
+    res.json({ voxels });
   } catch (error: any) {
-    console.error("AI Generation Error:", error);
-    res.status(500).json({ error: error.message || "Failed to forge design" });
+    console.error("AI Forge Error:", error);
+    const message = error.message || "The forge failed to ignite.";
+    res.status(500).json({ error: message });
   }
 });
 

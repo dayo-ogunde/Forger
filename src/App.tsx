@@ -124,22 +124,51 @@ const saveStorage = (key: string, data: any) => localStorage.setItem(key, JSON.s
 
 // --- Components ---
 
-const PixelEditor = ({ value, onChange, color }: { value: string[], onChange: (v: string[]) => void, color: string }) => {
-  // value is a 16x16 array of colors as flat array 256
+const PixelEditor = ({ value, onChange, color, tool, onColorPick }: { value: string[], onChange: (v: string[]) => void, color: string, tool: Tool, onColorPick?: (c: string) => void }) => {
   const grid = useMemo(() => value.length === 256 ? value : Array(256).fill('transparent'), [value]);
 
   const handlePaint = (idx: number, isRight: boolean) => {
     const next = [...grid];
-    next[idx] = isRight ? 'transparent' : color;
+    const activeTool = isRight ? 'eraser' : tool;
+
+    if (activeTool === 'pencil') {
+      next[idx] = color;
+    } else if (activeTool === 'eraser') {
+      next[idx] = 'transparent';
+    } else if (activeTool === 'eyedropper') {
+      if (grid[idx] !== 'transparent' && onColorPick) {
+        onColorPick(grid[idx]);
+      }
+      return;
+    } else if (activeTool === 'fill') {
+      const targetColor = grid[idx];
+      const queue = [idx];
+      const visited = new Set([idx]);
+      while (queue.length > 0) {
+        const curr = queue.shift()!;
+        next[curr] = color;
+        const neighbors = [
+          curr - 1, curr + 1, curr - 16, curr + 16
+        ].filter(n => {
+          if (n < 0 || n >= 256 || visited.has(n)) return false;
+          if (Math.abs(n - curr) === 1 && Math.floor(n / 16) !== Math.floor(curr / 16)) return false;
+          return grid[n] === targetColor;
+        });
+        neighbors.forEach(n => {
+          visited.add(n);
+          queue.push(n);
+        });
+      }
+    }
     onChange(next);
   };
 
   return (
-    <div className="grid grid-cols-16 gap-0 border border-white/10 w-fit cursor-crosshair select-none" onContextMenu={e => e.preventDefault()}>
+    <div className="grid grid-cols-16 gap-0 border border-white/10 w-fit cursor-crosshair select-none bg-black/40 rounded overflow-hidden" onContextMenu={e => e.preventDefault()}>
       {grid.map((c, i) => (
         <div 
           key={i} 
-          className="w-3 h-3 border-[0.5px] border-white/5" 
+          className="w-3.5 h-3.5 border-[0.5px] border-white/5" 
           style={{ backgroundColor: c === 'transparent' ? 'transparent' : c }}
           onPointerDown={e => handlePaint(i, e.button === 2)}
           onPointerEnter={e => { if (e.buttons === 1) handlePaint(i, false); if (e.buttons === 2) handlePaint(i, true); }}
@@ -177,6 +206,7 @@ export default function App() {
   // Settings
   const [voxelScale, setVoxelScale] = useState(1.0);
   const [activeTool, setActiveTool] = useState<Tool>('pencil');
+  const [pixelTool, setPixelTool] = useState<Tool>('pencil');
   const [axisLock, setAxisLock] = useState({ x: false, y: false, z: false });
   const [mirrorMode, setMirrorMode] = useState({ x: false, z: false });
   const [showGrid, setShowGrid] = useState(true);
@@ -197,6 +227,7 @@ export default function App() {
   const [status, setStatus] = useState({ text: 'Forge Ready', color: 'text-indigo-400' });
   const [isGenerating, setIsGenerating] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [isFlashing, setIsFlashing] = useState(false);
 
   // Engine Refs
   const containerRef = useRef<HTMLDivElement>(null);
@@ -343,6 +374,7 @@ export default function App() {
         imesh.setMatrixAt(i, dummy.matrix);
       });
       imesh.instanceMatrix.needsUpdate = true;
+      imesh.computeBoundingSphere();
     });
 
     customMeshes.forEach(m => m.count = 0);
@@ -361,6 +393,7 @@ export default function App() {
         imesh!.setMatrixAt(i, dummy.matrix);
       });
       imesh.instanceMatrix.needsUpdate = true;
+      imesh.computeBoundingSphere();
     });
   }, [voxels, yLayer, voxelScale]);
 
@@ -432,8 +465,11 @@ export default function App() {
         const matrix = new THREE.Matrix4();
         mesh.getMatrixAt(hit.instanceId!, matrix);
         const base = new THREE.Vector3().setFromMatrixPosition(matrix);
+        
         if (activeTool === 'eraser' || activeTool === 'eyedropper') return base;
-        return base.add(hit.face?.normal || new THREE.Vector3());
+        
+        const normal = hit.face?.normal.clone() || new THREE.Vector3(0, 1, 0);
+        return base.add(normal).round();
       } else {
         const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.5);
         const pt = new THREE.Vector3();
@@ -650,6 +686,7 @@ export default function App() {
 
   const handleForge = async () => {
     if (!prompt.trim()) return notify('Please enter a prompt', 'text-red-400');
+    
     setIsGenerating(true);
     notify('Igniting the forge...', 'text-indigo-400');
     
@@ -659,20 +696,48 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt })
       });
-      
+
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Forge failed');
       
-      if (data.voxels) {
+      const voxelList = data.voxels;
+      
+      if (Array.isArray(voxelList)) {
         const nextVoxels: Record<string, Voxel> = {};
-        data.voxels.forEach((v: any) => {
-          const key = `${v.x},${v.y},${v.z}`;
-          nextVoxels[key] = v;
+        voxelList.forEach((v: any) => {
+          if (v && typeof v.x === 'number' && typeof v.y === 'number' && typeof v.z === 'number') {
+            const vx = Math.floor(v.x);
+            const vy = Math.floor(v.y);
+            const vz = Math.floor(v.z);
+            if (vx >= 0 && vx < 16 && vy >= 0 && vy < 16 && vz >= 0 && vz < 16) {
+              const key = `${vx},${vy},${vz}`;
+              const blockId = v.block || 'stone';
+              const isPreset = PRESET_BLOCKS.some(p => p.id === blockId);
+              nextVoxels[key] = {
+                x: vx,
+                y: vy,
+                z: vz,
+                block: blockId,
+                isCustom: !isPreset && String(blockId).startsWith('#')
+              };
+            }
+          }
         });
+        
+        if (Object.keys(nextVoxels).length === 0) {
+          throw new Error('AI returned an empty design');
+        }
+        
         pushHistory(voxels);
         setVoxels(nextVoxels);
         notify('Design forged successfully!', 'text-green-400');
-        zoomToFit();
+        
+        // Visual confirmation
+        setTimeout(() => {
+          zoomToFit();
+          setIsFlashing(true);
+          setTimeout(() => setIsFlashing(false), 800);
+        }, 100);
       }
     } catch (err: any) {
       console.error(err);
@@ -741,6 +806,11 @@ export default function App() {
                <span className="absolute -bottom-8 left-1/2 -translate-x-1/2 bg-zinc-800 text-[8px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">{t.label}</span>
              </button>
            ))}
+           <div className="w-[1px] h-4 bg-white/10 mx-1" />
+           <button onClick={undo} disabled={history.length === 0} className="p-2 rounded text-zinc-500 hover:bg-white/5 disabled:opacity-20 transition-all"><Undo2 size={16} /></button>
+           <button onClick={redo} disabled={redoStack.length === 0} className="p-2 rounded text-zinc-500 hover:bg-white/5 disabled:opacity-20 transition-all"><Redo2 size={16} /></button>
+           <button onClick={() => { pushHistory(voxels); setVoxels({}); notify('Canvas cleared', 'text-orange-400'); }} className="p-2 rounded text-rose-500 hover:bg-rose-500/10 transition-all"><Trash2 size={16} /></button>
+           <button onClick={() => setNamingModal({ voxels })} className="p-2 rounded text-emerald-500 hover:bg-emerald-500/10 transition-all"><Save size={16} /></button>
         </div>
 
         <div className="flex items-center gap-4">
@@ -800,7 +870,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Main Canvas Area */}
-        <div className="relative flex-1 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-zinc-900 to-zinc-950">
+        <div className={`relative flex-1 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-zinc-900 to-zinc-950 transition-all duration-300 ${isFlashing ? 'ring-2 ring-indigo-500 ring-inset ring-offset-4 ring-offset-zinc-950' : ''}`}>
           <div ref={containerRef} className="h-full w-full" onPointerMove={handlePointer} onPointerDown={handlePointer} onContextMenu={e => e.preventDefault()} />
           
           {/* Overlays */}
@@ -880,10 +950,40 @@ export default function App() {
                     <p className="text-[8px] font-bold text-zinc-500 uppercase">Tab Name</p>
                     <input value={collectionName} onChange={e => { setCollectionName(e.target.value); saveStorage(STORAGE_KEYS.COLLECTION_NAME, e.target.value); }} className="w-full bg-zinc-800 border-none rounded p-2 text-xs" />
                  </div>
-                 <div className="space-y-2">
-                    <p className="text-[8px] font-bold text-zinc-500 uppercase">Tab Icon (Pixel Art)</p>
-                    <PixelEditor value={tabIcon} onChange={v => { setTabIcon(v); saveStorage(STORAGE_KEYS.TAB_ICON, v); }} color={customColor} />
-                    <p className="text-[7px] text-zinc-600 uppercase font-mono">L-Click: Paint | R-Click: Erase</p>
+                 <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                       <p className="text-[8px] font-bold text-zinc-500 uppercase">Tab Icon (Pixel Art)</p>
+                       <div className="flex items-center gap-1 bg-black/40 p-1 rounded border border-white/5">
+                          {[
+                            { id: 'pencil', icon: Pencil },
+                            { id: 'eraser', icon: Eraser },
+                            { id: 'fill', icon: PaintBucket },
+                            { id: 'eyedropper', icon: Pipette }
+                          ].map(t => (
+                            <button 
+                              key={t.id} 
+                              onClick={() => setPixelTool(t.id as Tool)}
+                              className={`p-1.5 rounded transition-all ${pixelTool === t.id ? 'bg-indigo-600 text-white' : 'text-zinc-500 hover:bg-white/5'}`}
+                            >
+                              <t.icon size={12} />
+                            </button>
+                          ))}
+                          <div className="w-[1px] h-3 bg-white/10 mx-0.5" />
+                          <button onClick={() => { setTabIcon(Array(256).fill('transparent')); notify('Icon cleared', 'text-orange-400'); }} className="p-1.5 rounded text-rose-500 hover:bg-rose-500/10 transition-all"><Trash2 size={12} /></button>
+                          <button onClick={() => { saveStorage(STORAGE_KEYS.TAB_ICON, tabIcon); notify('Icon saved', 'text-green-400'); }} className="p-1.5 rounded text-emerald-500 hover:bg-emerald-500/10 transition-all"><Save size={12} /></button>
+                       </div>
+                    </div>
+                    <PixelEditor 
+                      value={tabIcon} 
+                      onChange={v => { setTabIcon(v); saveStorage(STORAGE_KEYS.TAB_ICON, v); }} 
+                      color={customColor} 
+                      tool={pixelTool} 
+                      onColorPick={(c) => { setCustomColor(c); setIsCustomSelected(true); }}
+                    />
+                    <div className="flex items-center justify-between">
+                      <p className="text-[7px] text-zinc-600 uppercase font-mono">Tool: {pixelTool.toUpperCase()}</p>
+                      <button onClick={() => setTabIcon(Array(256).fill(customColor))} className="text-[7px] text-indigo-400 uppercase font-bold hover:underline">Flood Canvas</button>
+                    </div>
                  </div>
               </div>
             </div>
